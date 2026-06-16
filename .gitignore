@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+data/marketeye.db
+data/gumroad_config.json
+.DS_Store
+venv/
+.env
+*.zip
