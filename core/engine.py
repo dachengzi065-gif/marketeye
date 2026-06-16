@@ -1,8 +1,8 @@
 """Monitoring engine: orchestrates scraping, storage, and alerts."""
 
 import asyncio
+import httpx
 import logging
-from datetime import datetime, timezone
 from typing import Optional
 
 from . import database as db
@@ -21,7 +21,7 @@ class CheckResult:
         self.content_changed = False
         self.old_price: Optional[float] = None
         self.new_price: Optional[float] = None
-        self.currency = "¥"
+        self.currency = "CNY"
         self.in_stock = True
         self.alerts_sent = 0
         self.error: Optional[str] = None
@@ -57,7 +57,6 @@ async def check_product(product_id: int) -> CheckResult:
     prev = db.get_latest_snapshot(product_id)
     price_val = page.price if page.price is not None else (prev["price"] if prev else None)
 
-    # Save snapshot regardless
     db.save_snapshot(
         product_id,
         price_val,
@@ -74,7 +73,6 @@ async def check_product(product_id: int) -> CheckResult:
     if prev:
         result.old_price = prev.get("price")
 
-        # Stock change
         if prev.get("in_stock") is not None and prev["in_stock"] != (1 if page.in_stock else 0):
             result.stock_changed = True
             status = "✅ 有货" if page.in_stock else "❌ 缺货"
@@ -84,7 +82,6 @@ async def check_product(product_id: int) -> CheckResult:
             logger.info(msg)
             result.alerts_sent += 1
 
-        # Price change (threshold 0.5% to filter noise)
         if (prev.get("price") and price_val is not None
                 and abs(price_val - prev["price"]) / max(prev["price"], 0.01) > 0.005):
             result.price_changed = True
@@ -95,47 +92,41 @@ async def check_product(product_id: int) -> CheckResult:
             logger.info(msg)
             result.alerts_sent += 1
 
-        # Content change (title/product page changed significantly)
         if prev.get("raw_hash") and prev["raw_hash"] != page.raw_hash:
             result.content_changed = True
 
-    # Webhook alerts
-    if product.get("alert_webhook") and (result.price_changed or result.stock_changed):
-        _ = asyncio.create_task(
-            _dispatch_webhook(product["alert_webhook"], {
+    if result.price_changed or result.stock_changed:
+        alert_tasks = []
+        if product.get("alert_webhook"):
+            alert_tasks.append(_dispatch_webhook(product["alert_webhook"], {
                 "type": "price_change" if result.price_changed else "stock_change",
                 "product": product["name"],
                 "url": product["product_url"],
                 "old_price": str(result.old_price or ""),
                 "new_price": str(result.new_price or ""),
-            })
-        )
-
-    # Email alerts
-    if product.get("alert_email") and (result.price_changed or result.stock_changed):
-        _ = asyncio.create_task(
-            _dispatch_email(product["alert_email"], product["name"], result)
-        )
+            }))
+        if product.get("alert_email"):
+            alert_tasks.append(_dispatch_email(product["alert_email"], product["name"], result))
+        if alert_tasks:
+            await asyncio.gather(*alert_tasks, return_exceptions=True)
 
     return result
 
 
 async def check_all_products() -> list[CheckResult]:
-    """Check all enabled products."""
-    products = db.get_products()
-    results = []
-    for p in products:
-        if not p["enabled"]:
-            continue
+    """Check all enabled products concurrently."""
+    products = [p for p in db.get_products() if p["enabled"]]
+
+    async def _safe_check(p):
         try:
-            r = await check_product(p["id"])
-            results.append(r)
+            return await check_product(p["id"])
         except Exception as e:
             logger.error(f"[{p['name']}] Error: {e}")
             r = CheckResult(p["id"], p["name"])
             r.error = str(e)
-            results.append(r)
-    return results
+            return r
+
+    return list(await asyncio.gather(*(_safe_check(p) for p in products)))
 
 
 async def _dispatch_webhook(url: str, payload: dict):
@@ -147,5 +138,15 @@ async def _dispatch_webhook(url: str, payload: dict):
 
 
 async def _dispatch_email(email: str, product_name: str, result: CheckResult):
-    """Placeholder for email dispatch. Will implement SMTP support."""
-    logger.info(f"[EMAIL] Would send to {email} about {product_name} changes")
+    from alerts.email_sender import send_alert
+    parts = []
+    if result.price_changed:
+        parts.append(f"价格变动: {result.old_price} → {result.new_price} ({result.currency})")
+    if result.stock_changed:
+        parts.append(f"库存变更: {'有货' if result.in_stock else '缺货'}")
+    subject = f"[MarketEye] {product_name} 变动提醒"
+    body = "\n".join(parts)
+    try:
+        await asyncio.to_thread(send_alert, email, subject, body)
+    except Exception as e:
+        logger.error(f"Email dispatch failed: {e}")

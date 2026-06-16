@@ -63,6 +63,14 @@ def _ensure_tables(db):
             pk="id",
             foreign_keys=[("product_id", "products", "id")],
         )
+    db.conn.execute(
+        "CREATE INDEX IF NOT EXISTS ix_snap_pid_time "
+        "ON price_snapshots(product_id, fetched_at)"
+    )
+    db.conn.execute(
+        "CREATE INDEX IF NOT EXISTS ix_alerts_pid "
+        "ON alerts(product_id)"
+    )
 
 
 def add_product(name, url, store_name="", sku="",
