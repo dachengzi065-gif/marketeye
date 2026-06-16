@@ -2,6 +2,7 @@
 
 from pathlib import Path
 from datetime import datetime
+from html import escape as _esc
 
 from fastapi import FastAPI, Request, Form
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -233,7 +234,7 @@ def _product_row(p):
     snap = db.get_latest_snapshot(p["id"])
     price_str = ""
     if snap and snap.get("price") is not None:
-        cur = snap.get("currency", "¥") or "¥"
+        cur = _esc(snap.get("currency") or "¥")
         price_str = f'<span style="font-weight:600">{cur}{snap["price"]:.2f}</span>'
         # Show trend
         prev2 = db.get_snapshots(p["id"], limit=2)
@@ -246,11 +247,12 @@ def _product_row(p):
                     price_str += f' <span class="price-down">↓{abs(diff):.2f}</span>'
     else:
         price_str = '<span class="mono">--</span>'
-    store = p.get("store_name") or '-'
+    store = _esc(p.get("store_name") or '-')
+    name_esc = _esc(p['name'])
     interval = f"{p['check_interval_minutes']}m"
 
     return f"""<tr>
-<td><a href="/products/{p['id']}" style="color:#2563eb;text-decoration:none;font-weight:500">{p['name']}</a></td>
+<td><a href="/products/{p['id']}" style="color:#2563eb;text-decoration:none;font-weight:500">{name_esc}</a></td>
 <td>{store}</td>
 <td>{status}</td>
 <td>{price_str}</td>
@@ -259,7 +261,7 @@ def _product_row(p):
 <form method="post" action="/products/{p['id']}/toggle" style="display:inline">
 {"<button class='btn btn-warn btn-sm'>暂停</button>" if enabled else "<button class='btn btn-primary btn-sm'>启用</button>"}</form>
 <form method="post" action="/products/{p['id']}/check" style="display:inline"><button class="btn btn-sm btn-outline">检查</button></form>
-<form method="post" action="/products/{p['id']}/delete" style="display:inline" onsubmit="return confirm('确定删除 {p['name']} 的所有数据？')"><button class="btn btn-danger btn-sm">删除</button></form>
+<form method="post" action="/products/{p['id']}/delete" style="display:inline" onsubmit="return confirm('确定删除此商品的所有数据？')"><button class="btn btn-danger btn-sm">删除</button></form>
 </td>
 </tr>"""
 
@@ -275,21 +277,29 @@ def _alert_item(a):
         badge = '<span class="badge badge-yellow">价格</span>'
     elif a["alert_type"] == "stock_change":
         badge = '<span class="badge badge-green">库存</span>'
-    return f'<div class="alert-item">{badge} <span class="alert-time">{t}</span> <strong>{a["product_name"] or "?"}</strong> — {a["message"]}</div>'
+    pname = _esc(a["product_name"] or "?")
+    msg = _esc(a["message"])
+    return f'<div class="alert-item">{badge} <span class="alert-time">{t}</span> <strong>{pname}</strong> — {msg}</div>'
 
 
 def _render_detail(product, snaps, history):
     rows = "\n".join(_snap_row(s) for s in snaps) if snaps else '<tr><td colspan="5" style="text-align:center;padding:20px;color:#999">暂无数据</td></tr>'
     chart = _price_chart(history)
     latest = snaps[0] if snaps else None
-    price_cur = f"¥{latest['price']:.2f}" if latest and latest.get("price") else "暂无"
+    if latest and latest.get("price") is not None:
+        cur = latest.get("currency") or "¥"
+        price_cur = f"{_esc(cur)}{latest['price']:.2f}"
+    else:
+        price_cur = "暂无"
     stock_str = "✅ 有货" if latest and latest.get("in_stock") else ("❌ 缺货" if latest else "未知")
     status_badge = '<span class="badge badge-green">运行中</span>' if product["enabled"] else '<span class="badge badge-gray">已暂停</span>'
+    name_esc = _esc(product['name'])
+    url_esc = _esc(product['product_url'])
 
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{product['name']} — MarketEye</title>
+<title>{name_esc} — MarketEye</title>
 <style>{PAGE_STYLE}
 .price-big{{font-size:2rem;font-weight:700;color:#1a1a2e}}
 .grid-2{{display:grid;grid-template-columns:1fr 1fr;gap:16px}}
@@ -307,8 +317,8 @@ def _render_detail(product, snaps, history):
 <div class="card">
 <div style="display:flex;justify-content:space-between;align-items:start;flex-wrap:wrap;gap:12px">
 <div>
-<h1 style="font-size:1.4rem;margin-bottom:4px">🏷️ {product['name']}</h1>
-<p class="mono">{product['product_url']}</p>
+<h1 style="font-size:1.4rem;margin-bottom:4px">🏷️ {name_esc}</h1>
+<p class="mono">{url_esc}</p>
 </div>
 <div style="text-align:right">{status_badge}</div>
 </div>
@@ -323,8 +333,8 @@ def _render_detail(product, snaps, history):
 </div>
 <div class="card">
 <div class="grid">
-<div><div class="info-label">店铺</div><div class="info-val">{product.get('store_name') or '-'}</div></div>
-<div><div class="info-label">SKU</div><div class="info-val">{product.get('sku') or '-'}</div></div>
+<div><div class="info-label">店铺</div><div class="info-val">{_esc(product.get('store_name') or '-')}</div></div>
+<div><div class="info-label">SKU</div><div class="info-val">{_esc(product.get('sku') or '-')}</div></div>
 <div><div class="info-label">检查间隔</div><div class="info-val">{product['check_interval_minutes']} 分钟</div></div>
 <div><div class="info-label">快照数</div><div class="info-val">{len(snaps)}</div></div>
 </div>
@@ -353,9 +363,13 @@ def _render_detail(product, snaps, history):
 
 def _snap_row(s):
     t = s["fetched_at"][:19].replace("T", " ")
-    price = f'¥{s["price"]:.2f}' if s.get("price") else "-"
+    if s.get("price") is not None:
+        cur = _esc(s.get("currency") or "¥")
+        price = f'{cur}{s["price"]:.2f}'
+    else:
+        price = "-"
     stock = "✅" if s.get("in_stock") else ("❌" if s.get("in_stock") == 0 else "?")
-    title = s.get("title", "")[:50] or "-"
+    title = _esc(s.get("title", "")[:50] or "-")
     h = s.get("raw_hash", "")[:12] or "-"
     return f'<tr><td class="mono">{t}</td><td style="font-weight:600">{price}</td><td>{stock}</td><td class="mono">{title}</td><td class="mono">{h}</td></tr>'
 
@@ -376,11 +390,12 @@ def _price_chart(history):
         h = priced[i]
         pct = ((h["price"] - min_p) / rng) * 120 + 10
         color = "#ef4444" if i > 0 and h["price"] > priced[i - 1]["price"] else "#16a34a"
+        cur = _esc(h.get("currency") or "¥")
         bars.append(
             f'<div style="display:flex;flex-direction:column;align-items:center;gap:2px">'
-            f'<span style="font-size:0.65rem;color:#888">¥{h["price"]:.1f}</span>'
+            f'<span style="font-size:0.65rem;color:#888">{cur}{h["price"]:.1f}</span>'
             f'<div class="chart-bar" style="height:{pct:.0f}px;width:24px;background:{color}" '
-            f'title="{h["fetched_at"][:19]} ¥{h["price"]:.2f}"></div>'
+            f'title="{h["fetched_at"][:19]} {cur}{h["price"]:.2f}"></div>'
             f'<span style="font-size:0.6rem;color:#aaa">{h["fetched_at"][11:16]}</span>'
             f'</div>'
         )
